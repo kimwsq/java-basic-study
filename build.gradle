@@ -1,0 +1,22 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.example'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // 예시: Gson 추가
+    implementation 'com.google.code.gson:gson:2.10.1'
+
+    // 필요하면 다른 라이브러리도 여기 추가
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}

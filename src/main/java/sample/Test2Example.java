@@ -1,4 +1,4 @@
-package test;
+package sample;
 
 /*
 	•	문자열 "dog#cat#bird"가 있다.

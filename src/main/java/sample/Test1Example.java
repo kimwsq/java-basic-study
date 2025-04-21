@@ -1,4 +1,4 @@
-package test;
+package sample;
 
 /*
 	input.txt라는 파일을 만든다.
