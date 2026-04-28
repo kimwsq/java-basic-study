@@ -917,7 +917,79 @@ t.join();  // 종료 대기
 
 ---
 
-## 10. 자료구조 & 유틸리티
+## 10. 외부 프로그램 실행 (ProcessBuilder)
+
+### 10-1. 기본 실행 + 출력 읽기 + 종료 대기
+```java
+import java.io.*;
+
+ProcessBuilder pb = new ProcessBuilder("MOCK.EXE");  /* ✏️ 프로그램명 */
+pb.directory(new File("."));           // 실행 디렉토리 (상대경로 기준)
+pb.redirectErrorStream(true);          // stderr → stdout 합치기
+Process process = pb.start();
+
+BufferedReader br = new BufferedReader(
+        new InputStreamReader(process.getInputStream()));
+String line;
+while ((line = br.readLine()) != null) {
+    System.out.println(line);
+}
+
+int exitCode = process.waitFor();      // 종료될 때까지 대기
+```
+
+### 10-2. 인자(argument) 전달
+```java
+// 방법A: 직접 나열
+ProcessBuilder pb = new ProcessBuilder("MOCK.EXE", "8080", "param2");
+// → MOCK.EXE 8080 param2 로 실행됨
+
+// 방법B: 변수로 조립
+List<String> cmd = new ArrayList<>();
+cmd.add("MOCK.EXE");
+cmd.add(String.valueOf(port));         /* ✏️ int → String 변환 필수 */
+cmd.add(dataPath);
+ProcessBuilder pb = new ProcessBuilder(cmd);
+```
+
+### 10-3. 백그라운드 실행 (서버 띄운 뒤 외부 프로그램 실행)
+```java
+// 서버 start 후 외부 프로그램을 별도 스레드에서 실행
+ProcessBuilder pb = new ProcessBuilder("MOCK.EXE");
+pb.directory(new File("."));
+pb.redirectErrorStream(true);
+Process process = pb.start();
+
+// 출력을 별도 스레드에서 읽기 (안 읽으면 버퍼 차서 프로세스 멈춤)
+new Thread(() -> {
+    try {
+        BufferedReader br = new BufferedReader(
+                new InputStreamReader(process.getInputStream()));
+        String line;
+        while ((line = br.readLine()) != null) {
+            System.out.println(line);
+        }
+    } catch (IOException e) {
+        e.printStackTrace();
+    }
+}).start();
+
+// waitFor() 안 하면 메인 로직 계속 진행 (비동기)
+// 필요시: process.waitFor();
+```
+
+### 10-4. 프로세스에 입력 보내기 (stdin)
+```java
+Process process = pb.start();
+OutputStream os = process.getOutputStream();
+os.write("input data\n".getBytes());
+os.flush();
+os.close();   // close 해야 프로세스가 EOF 받음
+```
+
+---
+
+## 11. 자료구조 & 유틸리티
 
 ### 10-1. HashMap 기본
 ```java
@@ -969,7 +1041,7 @@ pw.close();
 
 ---
 
-## 11. 실전 체크리스트
+## 12. 실전 체크리스트
 
 ```
 [ ] 상대경로 사용 — Paths.get("STATE.TXT") O / Paths.get("C:\\TEST\\STATE.TXT") X
