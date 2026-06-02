@@ -1,4 +1,50 @@
+# 시험 시작하면 여기부터 — 문제 유형별 라우터
 
+> **순서: ① 아래 표에서 내 문제 유형 찾기 → ② 해당 파일들을 적힌 순서대로 복붙 → ③ 코드 주석에 표시된 수정 포인트만 시험지 보고 수정 → ④ 실행**
+> 실행: IDE에서 `MainEntry`(또는 시험지가 지정한 메인 클래스) **Run**. (Jetty가 안 잡히면 → 맨 아래 "IDE 세팅" 참고)
+
+| 유형 | 어떤 문제? | 만들 파일 (이 순서로 복붙) | 핵심 주의 |
+|------|-----------|---------------------------|-----------|
+| **L1 콘솔** | 파일 읽어서 콘솔 입력에 응답 | `MainEntry`(**2-2** 통째로) — 끝 | `while(true)` 필수, DTO는 **4-1**(public 필드) |
+| **L2 변수** | L1 + 파라미터/변수로 Query String 조립 | `VariableManager`(**4-5a**) → `State`(**4-1**) → `MainEntry`(**2-3**) | `URLEncoder`, keys==null이면 `?` 안 붙임 (**5-1**) |
+| **L3 HTTP** | 콘솔 대신 HTTP 서버로 받고, 외부 Microservice 호출 | `VariableManager`(**4-5b**) → `ActionState`(**7-4**) → `StateManager`(**7-5**) → `EngineServer`(**6-2**) → `MainEntry` | `server.join()` 필수, 응답 JSON→변수 반영(**3-7**), `httpClient.stop()` |
+| **L4 워크플로우** | L3 + 여러 State를 next로 연결, 분기/병렬 | `State`(**4-3**) → `VariableManager`(**4-5b**) → `ActionState`(**8-2**) → `ParallelState`(**8-3**) → `ChoiceState`(**8-4**, 분기 없으면 생략) → `Workflow`(**8-1**) → `WorkflowManager`(**8-5**) → `EngineServer`(**6-1**) → `MainEntry`(**8-6**) | DTO 필드명=JSON key(**8-5**), parallel은 `CountDownLatch`(**9-1**) |
+
+**공통 재료:** JSON 파싱 → **3번**(어떤 JSON이면 뭘 쓸지는 **3-0** 표) · HTTP 호출 → **7B**(`HttpUtil` 복붙) · 외부프로그램(MOCK.EXE) → **10번** · 마지막 점검 → **12번 체크리스트**
+
+> **L3/L4 HTTP 호출은 7B의 `HttpUtil`(Jetty 12.1)이 최신/권장.** 7번은 같은 내용을 풀어 쓴 설명용이니, 바쁘면 **7B만** 보면 됨.
+
+---
+
+# 지난번에 막힌 2가지 — 이번엔 여기부터
+
+### ① 클라이언트 못 만들겠다 → **§7B-0 `HttpUtil` 통째로 복붙**, 끝나면 두 줄로 호출
+```java
+String body = HttpUtil.get("http://127.0.0.1:8011/create?id=100a");   // GET
+String body = HttpUtil.postJson(url, "{\"id\":\"100a\"}");           // POST + JSON
+JsonObject resp = HttpUtil.getJson(url);   // 7B-6: 파싱까지 한 방 (JsonObject로 받기)
+```
+- 안 되면 십중팔구 **라이브러리 미연결(빨간 줄)** → **§13** 보고 jar 연결.
+- `start()`/`stop()`은 `HttpUtil` 안에 이미 들어있음 — **직접 호출 말고 복붙만.**
+
+### ② Gson 파싱 실패 → **`.class` 냐 `Type`(TypeToken) 이냐**부터 판단 (§3-2)
+```java
+// 받을 타입 최상위에 꺽쇠 <> 있으면 → 반드시 Type 방식! (지난번 여기서 막힘)
+Type type = new TypeToken<Map<String,String>>(){}.getType();   // (){} 빈 중괄호 필수
+Map<String,String> m = new Gson().fromJson(json, type);
+
+// 꺽쇠 없는 그냥 클래스면 → .class
+JsonObject obj = new Gson().fromJson(json, JsonObject.class);   // 값 꺼내기: obj.get("k").getAsString()
+```
+| 받을 타입 | 방법 |
+|---|---|
+| `Map<..>` · `List<..>` (최상위 제네릭) | **`Type` + `TypeToken` + `(){}`** |
+| `MyDto.class` · `JsonObject.class` | `.class` |
+| 위 제네릭을 **DTO 필드 안**에 넣음 | `.class` 로 OK (TypeToken 회피법) |
+
+> 자세한 설명·예외·4대 파싱 실패 원인 → **§3-0 / §3-2 / §3-3**
+
+---
 
 ## 1. 파일 읽기
 
@@ -150,14 +196,42 @@ String input = stdin.readLine().trim();
 
 ## 3. JSON 처리 (Gson)
 
+### 3-0. JSON 형태 → 변환법 선택 가이드 (먼저 이거 보고 결정!)
+```
+┌─ JSON이 이렇게 생겼으면 ────────────────┬─ 이 방법을 써라 ──────────┐
+│ {"state":{...}, "type":"...", 고정 구조 │ 3-1 DTO 클래스 (fromJson) │
+│   → key 이름을 미리 아는 구조           │   key=필드명으로 매핑       │
+├─────────────────────────────────────────┼───────────────────────────┤
+│ {"keyword":"폰","id":"100a"}            │ 3-2 TypeToken             │
+│   → key가 가변/임의, 값이 전부 같은 타입 │   Map<String,String>으로   │
+├─────────────────────────────────────────┼───────────────────────────┤
+│ {"key":"eH7bDVXX"} 응답 한두 개 꺼내기  │ 3-3 JsonObject 직접 get   │
+│   → DTO 만들기 귀찮은 단발성            │   obj.get("key")          │
+├─────────────────────────────────────────┼───────────────────────────┤
+│ {"a":"1","b":"2",...} key 모름, 전부 순회│ 3-4 keySet/entrySet 순회 │
+├─────────────────────────────────────────┼───────────────────────────┤
+│ {"items":["x","y","z"]} 또는 [ {...} ]  │ 3-5 JsonArray 순회        │
+├─────────────────────────────────────────┼───────────────────────────┤
+│ 내가 응답 JSON을 만들어서 내보내야 함    │ 3-6 JsonObject 생성       │
+└─────────────────────────────────────────┴───────────────────────────┘
+요약: 구조 고정+중첩 → DTO / key 가변 동일타입 → TypeToken / 단발 꺼내기 → get
+```
+
 ### 3-1. DTO 클래스로 역직렬화 (L3/L4 핵심!)
 ```java
 import com.google.gson.Gson;
 
+// ── 이런 JSON일 때 (구조가 고정, key 이름을 미리 앎, 중첩 객체) ──
+// {
+// "state": {
+// "create": { "type":"action", "url":"http://...", "parameters":["id"] },
+// "fetch":  { "type":"action", "url":"http://...", "parameters":[] }
+// }
+// }
 // JSON 구조에 맞는 DTO 정의 — 필드명이 JSON key와 반드시 일치해야 함!
 // "state" 키 → public ... state;  오타나면 null로 파싱되어 NPE 발생
 class StatesDto {
-    public Map<String, StateDto> state;   // JSON의 "state" 키
+    public Map<String, StateDto> state;   // JSON의 "state" 키 (안쪽 key가 가변이라 Map)
     static class StateDto {
         public String type;               // JSON의 "type" 키
         public String url;
@@ -167,42 +241,86 @@ class StatesDto {
 
 // 한줄로 파싱 — 내부 클래스에서 사용 시 static class로 선언해야 Gson이 인스턴스 생성 가능
 StatesDto dto = new Gson().fromJson(jsonString, StatesDto.class);
+// 접근: dto.state.get("create").url
 ```
 
-### 3-2. TypeToken으로 Map 역직렬화 (VariableManager용)
+### 3-2. TypeToken으로 Map/List 역직렬화 (지난번 여기서 막힘!)
 ```java
 import com.google.gson.reflect.TypeToken;
 import java.lang.reflect.Type;
 
-// 제네릭 타입(Map<String,String>)은 .class로 전달 불가 → TypeToken 필수
-Type type = new TypeToken<Map<String, String>>() {}.getType();  // 중괄호 {} 빠뜨리면 컴파일 에러
-Map<String, String> map = new Gson().fromJson(jsonString, type);
-```
+// 학습노트 (지난번 시험 실패 원인):
+// Gson 파싱할 때 "Type type = new TypeToken<...>(){}.getType()" 이게 필요한 줄 몰라서 막혔음.
+// → Map/List 처럼 꺽쇠<>가 최상위면 .class로는 절대 안 되고, 반드시 이 Type 방식.
+// → 다음엔: JSON이 통째로 Map/List면 TypeToken, 객체 하나면 DTO.class 또는 JsonObject.class.
 
-### 3-3. JsonParser로 직접 파싱
+// 핵심 규칙 
+// 받을 타입의 "최상위에 꺽쇠 <> 가 있으면" → 무조건 이 Type 방식.
+// Map<String,String>, List<String>, List<Dto>  →  TypeToken 필수
+// 그냥 클래스(MyDto.class, JsonObject.class)     →  .class 사용 (3-1, 3-3)
+//
+// Map.class / List.class 로 받으면 컴파일되거나 되어도 값이 깨짐(숫자→Double 등) → 지난번 실패 원인
+// Map<String,String>.class 는 문법상 작성 자체가 안 됨 → 그래서 Type이 필요한 것
+
+// ── 이런 JSON일 때 (최상위가 통째로 Map, key가 가변/임의, 값 타입 동일) ──
+// {
+// "keyword": "스마트폰",
+// "id":      "100a",
+// "token":   "eH7bDVXX"
+// }
+Type type = new TypeToken<Map<String, String>>() {}.getType();  // (){} 빈 중괄호 필수! (없으면 타입 못 잡음)
+Map<String, String> map = new Gson().fromJson(jsonString, type);
+// 접근: map.get("keyword") → "스마트폰"
+
+// ── 최상위가 배열일 때: [ {"id":"1"}, {"id":"2"} ] ──
+Type listType = new TypeToken<List<MyDto>>() {}.getType();
+List<MyDto> list = new Gson().fromJson(jsonString, listType);
+```
+>  **TypeToken 쓰기 싫으면 → DTO 클래스로 감싸라.**
+> 제네릭이 "클래스의 필드 안"에 있으면 `.class`로 충분하다 (필드는 reflection으로 타입이 유지됨).
+> 그래서 3-1의 `StatesDto`(필드가 `Map<String,StateDto> state`)는 `StatesDto.class`로 잘 됨.
+> **정리: 최상위가 통째로 Map/List → TypeToken / DTO로 감싸면 → .class**
+> (값이 숫자/객체가 섞여 있으면 `Map<String,Object>` 또는 3-3 JsonObject 방식으로)
+
+### 3-3. JsonParser / JsonObject로 직접 꺼내기 (단발성)
 ```java
 import com.google.gson.*;
 
+// ── 이런 JSON일 때 (값 한두 개만 빠르게 꺼낼 때, DTO 만들기 아까움) ──
+// {"name":"create", "count":3, "key":"eH7bDVXX"}
 JsonObject obj = JsonParser.parseString(jsonString).getAsJsonObject();
-String val   = obj.get("name").getAsString();
-int num      = obj.get("count").getAsInt();
-if (obj.has("key")) { /* 필드 존재 체크 */ }
+// (= new Gson().fromJson(jsonString, JsonObject.class) 와 동일)
+String val   = obj.get("name").getAsString();    // "create"
+int num      = obj.get("count").getAsInt();      // 3   (문자열이면 getAsString)
+if (obj.has("key")) { /* 필드 존재 체크 — 없는 key를 get하면 NPE */ }
+// 중첩이면: obj.getAsJsonObject("state").get("type").getAsString()
 ```
 
-### 3-4. JSON Object 순회
+### 3-4. JSON Object 순회 (key를 모를 때 전부)
 ```java
+// ── 이런 JSON일 때 (응답의 모든 key/value를 훑어야 함, key가 미정) ──
+// {"id":"100a", "token":"eH7b", "total":"1"}
 for (Map.Entry<String, JsonElement> e : obj.entrySet()) {
-    String key = e.getKey();
-    JsonElement val = e.getValue();
+    String key = e.getKey();                      // "id", "token", "total"
+    String value = e.getValue().getAsString();    // "100a" ...
+    // 예: VariableManager.put(key, value);  ← 응답 전체를 변수로 반영 (3-7)
 }
+// 간단히 key만: for (String k : obj.keySet()) { obj.get(k).getAsString(); }
 ```
 
 ### 3-5. JSON Array 순회
 ```java
+// ── 이런 JSON일 때 (배열 필드, 또는 최상위가 배열) ──
+// 객체 안 배열: {"items": ["사과", "바나나", "체리"]}
 JsonArray arr = obj.getAsJsonArray("items");
 for (JsonElement e : arr) {
-    String item = e.getAsString();
+    String item = e.getAsString();                // "사과" ...
 }
+
+// 최상위가 통째로 배열: [{"id":"1"}, {"id":"2"}]
+// JsonArray top = JsonParser.parseString(jsonString).getAsJsonArray();
+// for (JsonElement e : top) { e.getAsJsonObject().get("id").getAsString(); }
+// → DTO로 받으려면: new Gson().fromJson(json, new TypeToken<List<Dto>>(){}.getType())
 ```
 
 ### 3-6. JSON 응답 생성
@@ -327,7 +445,7 @@ public class VariableManager {
 
     public static void load() throws Exception {
         Type type = new TypeToken<Map<String, String>>() {}.getType();
-        String json = new String(Files.readAllBytes(Paths.get("VARIABLE.JSON"))); /* ✏️ 파일명 확인 */
+        String json = new String(Files.readAllBytes(Paths.get("VARIABLE.JSON"))); /* 파일명 확인 */
         variables = Collections.synchronizedMap(new Gson().fromJson(json, type));
     }
 }
@@ -393,13 +511,13 @@ import com.google.gson.*;
 
 public class EngineServer {
     public static void start() throws Exception {
-        Server server = new Server(8080);                         /* ✏️ 포트 확인 */
+        Server server = new Server(8080);                         /* 포트 확인 */
         server.setHandler(new Handler.Abstract() {
             @Override
             public boolean handle(Request request, Response response,
                     Callback callback) throws Exception {
 
-                String name = request.getHttpURI().getPath().substring(1); /* ✏️ path 파싱 방식 확인 */
+                String name = request.getHttpURI().getPath().substring(1); /* path 파싱 방식 확인 */
                 String result = WorkflowManager.get(name).run().toString();
 
                 response.setStatus(200);
@@ -412,7 +530,7 @@ public class EngineServer {
         server.join();
     }
 }
-// ✏️ 포트, path 파싱만 시험지 보고 확인 — 나머지 그대로 복붙
+// 포트, path 파싱만 시험지 보고 확인 — 나머지 그대로 복붙
 ```
 
 ### 6-2. L3-HTTP EngineServer.java (빈 200 응답, 그대로 복붙)
@@ -427,7 +545,7 @@ import com.google.gson.*;
 
 public class EngineServer {
     public static void start() throws Exception {
-        Server server = new Server(8080);                         /* ✏️ 포트 확인 */
+        Server server = new Server(8080);                         /* 포트 확인 */
         server.setHandler(new Handler.Abstract() {
             @Override
             public boolean handle(Request request, Response response,
@@ -436,7 +554,7 @@ public class EngineServer {
                 // POST body에서 state 이름 꺼내기
                 String body = Content.Source.asString(request);
                 JsonObject obj = new Gson().fromJson(body, JsonObject.class);
-                String name = obj.get("name").getAsString();      /* ✏️ JSON key 확인 */
+                String name = obj.get("name").getAsString();      /* JSON key 확인 */
 
                 StateManager.get(name).run();
 
@@ -449,7 +567,7 @@ public class EngineServer {
         server.join();
     }
 }
-// ✏️ 포트, body의 JSON key만 시험지 보고 확인 — 나머지 그대로 복붙
+// 포트, body의 JSON key만 시험지 보고 확인 — 나머지 그대로 복붙
 ```
 
 ### 6-3. 방식A: 빈 200 응답 (snippet)
@@ -495,6 +613,94 @@ public class EngineServlet extends HttpServlet {
         response.getWriter().write(result);
     }
 }
+```
+
+### 6-6. JSON 받고 JSON 응답하는 범용 서버 (엔진 없이 — 복붙 후 switch만 채움)
+```java
+// 워크플로우 엔진(6-1/6-2)과 무관한 "그냥 JSON in → JSON out" 서버.
+// readJson()/writeJson() 헬퍼까지 통째로 복붙 → switch 안의 로직만 채우면 끝.
+import org.eclipse.jetty.server.Server;
+import org.eclipse.jetty.server.Request;
+import org.eclipse.jetty.server.Response;
+import org.eclipse.jetty.server.Handler;
+import org.eclipse.jetty.util.Callback;
+import org.eclipse.jetty.io.Content;
+import org.eclipse.jetty.http.HttpHeader;
+import com.google.gson.*;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+
+public class JsonServer {
+    // Jetty는 요청마다 다른 스레드 → 공유 저장소는 반드시 ConcurrentHashMap
+    private static Map<String, JsonObject> store = new ConcurrentHashMap<>();
+
+    public static void start() throws Exception {
+        Server server = new Server(8080);                          /* 포트 */
+        server.setHandler(new Handler.Abstract() {
+            @Override
+            public boolean handle(Request request, Response response,
+                    Callback callback) throws Exception {
+
+                String path   = request.getHttpURI().getPath();    // 예: "/monitoring"
+                String method = request.getMethod();               // "GET" / "POST"
+                JsonObject in = readJson(request);                 // 요청 body(JSON) → JsonObject
+                JsonObject out = new JsonObject();                 // 응답으로 돌려줄 JSON
+
+                switch (path) {                                    /* 경로별 로직만 채우기 */
+                    case "/monitoring": {
+                        // 예) 받은 데이터를 키로 저장
+                        String key = in.get("agentId").getAsString();   // 값 끝 공백 주의 → .trim()
+                        store.put(key, in);
+                        out.addProperty("ok", 1);
+                        break;
+                    }
+                    case "/query": {
+                        // 예) GET 쿼리파라미터 읽기: /query?id=100a
+                        String id = valueOf(request, "id");
+                        out.addProperty("count", store.size());
+                        break;
+                    }
+                    default:
+                        response.setStatus(404);                   // 모르는 경로
+                        callback.succeeded();
+                        return true;
+                }
+                writeJson(response, callback, out);                // JsonObject → 200 JSON 응답
+                return true;
+            }
+        });
+        server.start();
+        server.join();                                            // 종료 없이 대기 (필수!)
+    }
+
+    // ── 요청 body(JSON) → JsonObject. body 없으면(GET 등) 빈 객체 ──
+    private static JsonObject readJson(Request request) throws Exception {
+        String body = Content.Source.asString(request);
+        if (body == null || body.isEmpty()) return new JsonObject();
+        return new Gson().fromJson(body, JsonObject.class);
+    }
+
+    // ── JsonObject → 200 + application/json 으로 응답 ──
+    private static void writeJson(Response response, Callback callback, JsonObject json) {
+        response.setStatus(200);
+        response.getHeaders().put(HttpHeader.CONTENT_TYPE, "application/json");
+        Content.Sink.write(response, true, json.toString(), callback);  // callback까지 처리됨
+    }
+
+    // ── GET 쿼리파라미터 한 개 꺼내기 (/path?key=value) — 순수 문자열 파싱(안전) ──
+    private static String valueOf(Request request, String key) {
+        String q = request.getHttpURI().getQuery();    // "id=100a&page=1" 또는 null
+        if (q == null) return null;
+        for (String pair : q.split("&")) {
+            String[] kv = pair.split("=", 2);
+            if (kv[0].equals(key)) return kv.length > 1 ? kv[1] : "";
+        }
+        return null;
+    }
+}
+// 사용: main에서 JsonServer.start(); 한 줄
+// 포트 / switch 경로·로직만 수정 — readJson/writeJson/valueOf는 그대로 복붙
+// 빈 200만 줄 거면 writeJson 대신: response.setStatus(200); callback.succeeded();
 ```
 
 
@@ -620,8 +826,211 @@ public class StateManager {
         }
     }
 }
-// ✏️ DTO 필드명 = JSON key 이름 — 시험지 JSON 보고 확인
+// DTO 필드명 = JSON key 이름 — 시험지 JSON 보고 확인
 // 나머지는 그대로 복붙
+```
+
+---
+
+## 7B. Jetty 12.1 HTTP Client 심화 (POST / JSON Body / 멀티스레드)
+
+> 7번이 기본 GET이라면, 여기는 POST·JSON 전송·동시 호출까지. **Jetty 12.1 (최신)** 기준.
+> import 경로가 Jetty 9/11과 다름 — 아래 표대로만 쓰면 됨.
+>
+> | 클래스 | Jetty 12.1 import 경로 |
+> |--------|------------------------|
+> | HttpClient | `org.eclipse.jetty.client.HttpClient` |
+> | ContentResponse | `org.eclipse.jetty.client.ContentResponse` |
+> | Request | `org.eclipse.jetty.client.Request` |
+> | StringRequestContent (body 전송) | `org.eclipse.jetty.client.StringRequestContent` |
+> | HttpMethod | `org.eclipse.jetty.http.HttpMethod` |
+>
+> ※ 컴파일 에러 시 `org.eclipse.jetty.client.api.ContentResponse` (구버전 경로)도 시도.
+
+### 7B-0. HttpUtil.java — 복붙용 유틸 (이것만 있으면 GET/POST 끝)
+```java
+import com.google.gson.*;
+import org.eclipse.jetty.client.HttpClient;
+import org.eclipse.jetty.client.ContentResponse;
+import org.eclipse.jetty.client.StringRequestContent;
+
+/**
+ * Jetty 12.1 HTTP Client 래퍼.
+ * 매 호출마다 start()/stop() 하므로 쓰기 쉽지만, 반복 호출 많으면
+ * 7B-4처럼 client 하나를 재사용하는 게 빠름.
+ */
+public class HttpUtil {
+
+    /** GET 요청 → 응답 body(String) 반환. 예: get("http://127.0.0.1:8011/create?id=100a") */
+    public static String get(String url) throws Exception {
+        HttpClient client = new HttpClient();
+        client.start();                                   // 안 하면 IllegalStateException
+        try {
+            ContentResponse resp = client.GET(url);       // 동기(블로킹) 호출
+            return resp.getContentAsString();             // resp.getStatus() 로 상태코드도 가능
+        } finally {
+            client.stop();                                // 안 하면 커넥션 풀 누수 → 이후 요청 hang
+        }
+    }
+
+    /** POST + JSON body 요청 → 응답 body(String) 반환. */
+    public static String postJson(String url, String jsonBody) throws Exception {
+        HttpClient client = new HttpClient();
+        client.start();
+        try {
+            ContentResponse resp = client.POST(url)
+                    .body(new StringRequestContent("application/json", jsonBody))  // 본문+Content-Type 한 번에
+                    .send();                              // 동기 전송
+            return resp.getContentAsString();
+        } finally {
+            client.stop();
+        }
+    }
+
+    /** 응답 JSON을 그대로 VariableManager에 반영 (L3/L4 빈출 패턴). */
+    public static void getAndUpdateVars(String url) throws Exception {
+        String body = get(url);
+        JsonObject json = new Gson().fromJson(body, JsonObject.class);
+        for (String k : json.keySet()) {                  // {"key":"eH7bDVXX"} → put("key","eH7bDVXX")
+            VariableManager.put(k, json.get(k).getAsString());
+        }
+    }
+}
+// 사용: String body = HttpUtil.get(url);
+// String body = HttpUtil.postJson(url, "{\"id\":\"100a\"}");
+// HttpUtil.getAndUpdateVars(url);
+```
+
+### 7B-1. 기본 GET (한 번만 호출할 때)
+```java
+HttpClient client = new HttpClient();
+client.start();
+try {
+    ContentResponse resp = client.GET("http://127.0.0.1:8011/create?id=100a");
+    int status   = resp.getStatus();              // 200, 404 ...
+    String body  = resp.getContentAsString();     // 응답 본문 (JSON 문자열 등)
+} finally {
+    client.stop();
+}
+```
+
+### 7B-2. POST + JSON Body 전송
+```java
+import org.eclipse.jetty.client.StringRequestContent;
+
+String jsonBody = "{\"targetPort\": 8001}";       // 동적이면 new Gson().toJson(map)
+
+HttpClient client = new HttpClient();
+client.start();
+try {
+    ContentResponse resp = client.POST("http://localhost:8080/proxy")
+            .body(new StringRequestContent("application/json", jsonBody))
+            .send();
+    String body = resp.getContentAsString();
+} finally {
+    client.stop();
+}
+// .body(new StringRequestContent("application/json", ...)) 가 Content-Type 헤더까지 설정
+// 추가 헤더 필요하면: .headers(h -> h.put("X-Token", "abc")) 체인
+```
+
+### 7B-3. 상세 요청 (메서드/타임아웃/쿼리 직접 제어)
+```java
+import org.eclipse.jetty.http.HttpMethod;
+import java.util.concurrent.TimeUnit;
+
+ContentResponse resp = client.newRequest("http://localhost:8080/path")
+        .method(HttpMethod.GET)                   // 또는 .method("GET")
+        .timeout(5, TimeUnit.SECONDS)             // 응답 5초 안 오면 예외
+        .send();
+String body = resp.getContentAsString();
+```
+
+### 7B-4. 여러 요청 순차 호출 — client 1개 재사용 (효율적)
+```java
+// client를 매번 new 하지 말고 하나로 재사용 → start/stop 오버헤드 제거
+HttpClient client = new HttpClient();
+client.start();
+try {
+    int[] ports = {8001, 8002, 8001, 8002};
+    for (int port : ports) {
+        try {
+            ContentResponse resp = client.GET("http://localhost:8080/" + port);
+            System.out.println("[요청 → " + port + "] " + resp.getContentAsString());
+        } catch (Exception e) {
+            System.out.println("[요청 실패 → " + port + "] " + e.getMessage());
+            // try-catch를 루프 안에 → 한 요청 실패해도 다음 요청 계속
+        }
+    }
+} finally {
+    client.stop();                                // 모든 요청 끝난 뒤 한 번만 stop
+}
+```
+
+### 7B-5. 멀티스레드 동시 호출 (ExecutorService)
+```java
+import java.util.concurrent.*;
+
+// HttpClient는 thread-safe → 하나를 여러 스레드가 공유 가능 (스레드마다 new 금지!)
+HttpClient client = new HttpClient();
+client.start();
+ExecutorService pool = Executors.newFixedThreadPool(5);   // 스레드풀 크기
+
+String[] names = {"Alice", "Bob", "Charlie", "Dana", "Eve"};
+for (String name : names) {
+    String target = name;                                 // 람다용 effectively final 복사
+    pool.submit(() -> {
+        try {
+            String json = String.format("{\"name\":\"%s\",\"task\":\"TestConnection\"}", target);
+            ContentResponse resp = client.POST("http://localhost:8083/proxy")
+                    .body(new StringRequestContent("application/json", json))
+                    .send();
+            System.out.println("[응답] " + target + " → " + resp.getContentAsString());
+        } catch (Exception e) {
+            System.out.println("[에러] " + target + ": " + e.getMessage());
+        }
+    });
+}
+
+pool.shutdown();                                          // 새 작업 거부, 진행중인 건 마저 실행
+pool.awaitTermination(5, TimeUnit.SECONDS);               // 전부 끝날 때까지 최대 5초 대기
+client.stop();                                            // 모든 스레드 끝난 뒤 stop
+// shutdown()만 하고 awaitTermination() 안 하면 main이 먼저 끝나 결과 못 봄
+```
+
+### 7B-6. JsonObject로 바로 주고받기 (파싱 한 줄도 생략)
+```java
+// HttpUtil(7B-0)에 아래 2개 메서드만 추가하면, 응답을 JsonObject로 바로 받음.
+import com.google.gson.*;
+
+/** GET → 응답을 JsonObject로 반환. 예: getJson(url).get("key").getAsString() */
+public static JsonObject getJson(String url) throws Exception {
+    return new Gson().fromJson(get(url), JsonObject.class);     // get()은 7B-0
+}
+
+/** POST(JsonObject body) → 응답을 JsonObject로 반환. */
+public static JsonObject postJson(String url, JsonObject body) throws Exception {
+    return new Gson().fromJson(postJson(url, body.toString()), JsonObject.class);
+    // ↑ postJson(String,String)은 7B-0. 같은 이름 오버로드라 충돌 X
+}
+```
+```java
+// ── 사용 예: 6-6 JsonServer와 짝으로 ──
+JsonObject body = new JsonObject();
+body.addProperty("agentId",   "agent01");
+body.addProperty("requestId", "req001");
+
+JsonObject resp = HttpUtil.postJson("http://localhost:8080/monitoring", body);
+int correct = resp.get("correct").getAsInt();    // 파싱 코드 없이 바로 사용
+
+// 파일 각 줄을 JSON으로 만들어 연속 POST (실전 패턴)
+for (String line : Files.readAllLines(Paths.get("DATA.TXT"))) {
+    String[] p = line.split("#");                 // agentId#reqId#type#value
+    JsonObject b = new JsonObject();
+    b.addProperty("agentId", p[0]);
+    b.addProperty("requestId", p[1]);
+    HttpUtil.postJson("http://localhost:8080/monitoring", b);
+}
 ```
 
 ---
@@ -804,12 +1213,12 @@ public class WorkflowManager {
 
     // ── DTO: 시험지 JSON 구조 보고 필드 확인할 것 ──
     static class WorkflowsDto {
-        public Map<String, WorkflowDto> workflow; /* ✏️ JSON 최상위 key 확인 */
+        public Map<String, WorkflowDto> workflow; /* JSON 최상위 key 확인 */
 
         static class WorkflowDto {
-            public String startFrom;              /* ✏️ JSON에 있는지 확인 */
+            public String startFrom;              /* JSON에 있는지 확인 */
             public Map<String, StateDto> state;
-            public List<String> responses;        /* ✏️ JSON에 있는지 확인 */
+            public List<String> responses;        /* JSON에 있는지 확인 */
 
             static class StateDto {
                 public String type;
@@ -830,7 +1239,7 @@ public class WorkflowManager {
 
     // ── load: 그대로 복붙 ──
     public static void load() throws Exception {
-        String json = new String(Files.readAllBytes(Paths.get("WORKFLOW.JSON"))); /* ✏️ 파일명 확인 */
+        String json = new String(Files.readAllBytes(Paths.get("WORKFLOW.JSON"))); /* 파일명 확인 */
         WorkflowsDto dto = new Gson().fromJson(json, WorkflowsDto.class);
         for (Map.Entry<String, WorkflowsDto.WorkflowDto> e : dto.workflow.entrySet()) {
             map.put(e.getKey(), makeWorkflow(e.getValue()));
@@ -851,13 +1260,13 @@ public class WorkflowManager {
         switch (sd.type) {
             case "action":
                 return new ActionState(name, sd.next, sd.url, sd.parameters);
-            case "parallel":                          /* ✏️ parallel 없는 문제면 이 case 삭제 */
+            case "parallel":                          /* parallel 없는 문제면 이 case 삭제 */
                 List<Workflow> branches = new ArrayList<>();
                 for (WorkflowsDto.WorkflowDto bd : sd.branches) {
                     branches.add(makeWorkflow(bd));
                 }
                 return new ParallelState(name, sd.next, branches);
-            case "choice":                            /* ✏️ choice 없는 문제면 이 case 삭제 */
+            case "choice":                            /* choice 없는 문제면 이 case 삭제 */
                 List<ChoiceState.Choice> choices = new ArrayList<>();
                 for (WorkflowsDto.WorkflowDto.StateDto.ChoiceDto cd : sd.choices) {
                     choices.add(new ChoiceState.Choice(cd.variable, cd.equal, cd.next));
@@ -867,7 +1276,7 @@ public class WorkflowManager {
         return null;
     }
 }
-// ✏️ 표시 = 시험지 JSON 보고 확인/수정할 부분
+// 주석에 "확인"이라고 적힌 곳만 시험지 JSON 보고 확인/수정할 부분
 // 나머지는 그대로 복붙
 ```
 
@@ -923,7 +1332,7 @@ t.join();  // 종료 대기
 ```java
 import java.io.*;
 
-ProcessBuilder pb = new ProcessBuilder("MOCK.EXE");  /* ✏️ 프로그램명 */
+ProcessBuilder pb = new ProcessBuilder("MOCK.EXE");  /* 프로그램명 */
 pb.directory(new File("."));           // 실행 디렉토리 (상대경로 기준)
 pb.redirectErrorStream(true);          // stderr → stdout 합치기
 Process process = pb.start();
@@ -947,7 +1356,7 @@ ProcessBuilder pb = new ProcessBuilder("MOCK.EXE", "8080", "param2");
 // 방법B: 변수로 조립
 List<String> cmd = new ArrayList<>();
 cmd.add("MOCK.EXE");
-cmd.add(String.valueOf(port));         /* ✏️ int → String 변환 필수 */
+cmd.add(String.valueOf(port));         /* int → String 변환 필수 */
 cmd.add(dataPath);
 ProcessBuilder pb = new ProcessBuilder(cmd);
 ```
@@ -1006,36 +1415,78 @@ for (Map.Entry<String, State> e : map.entrySet()) {
 groups.computeIfAbsent(key, k -> new ArrayList<>()).add(item);
 ```
 
+### 10-2b. Set — 중복 제거 / 빠른 포함 체크
+```java
+Set<String> set = new HashSet<>(agentList);   // List → Set: 중복 자동 제거
+if (set.contains(id)) { /* ... */ }            // contains는 O(1)
+
+// 정렬된 Map이 필요하면 TreeMap (key 자동 오름차순)
+TreeMap<String, List<String>> sorted = new TreeMap<>();
+```
+
 ### 10-3. 빈도수 카운팅
 ```java
-countMap.merge(item, 1, Integer::sum);
+countMap.merge(item, 1, Integer::sum);                       // 추천
+// 또는: countMap.put(item, countMap.getOrDefault(item, 0) + 1);
 ```
 
 ### 10-4. 정렬
 ```java
-Collections.sort(list);                             // 오름차순
+Collections.sort(list);                              // 오름차순
 Collections.sort(list, Collections.reverseOrder());  // 내림차순
+
+// ── 숫자 포함 문자열 정렬 ("req2" < "req10" 처럼 숫자 크기대로) ──
+// 그냥 정렬하면 "req10" < "req2" (사전순) 이 되는 함정!
+list.sort((a, b) -> {
+    int na = Integer.parseInt(a.replaceAll("[^0-9]", ""));   // 숫자만 추출
+    int nb = Integer.parseInt(b.replaceAll("[^0-9]", ""));
+    return Integer.compare(na, nb);
+});
+
+// ── Map을 value 기준 정렬 (빈도수 Top-N 뽑을 때) ──
+List<Map.Entry<String, Integer>> entries = new ArrayList<>(countMap.entrySet());
+entries.sort((a, b) -> b.getValue().compareTo(a.getValue()));  // value 내림차순
 ```
 
-### 10-5. 통계
+### 10-5. 통계 (합/평균/최대/최소/일치율)
 ```java
+// ── 일치율·정확도 (예측 vs 실제) — "8/10" 형태 빈출 ──
+int total = 0, correct = 0;
+for (...) { total++; if (predicted.equals(actual)) correct++; }
+System.out.println(correct + "/" + total);
+
+// ── 평균 (정수 나눗셈 함정!) ──
 long sum = 0; int count = 0;
 for (...) { sum += val; count++; }
-long avg = count > 0 ? sum / count : 0;
+long avg = count > 0 ? sum / count : 0;   // long/int 정수나눗셈 → 소수점 버림(문제서 정수 보장)
+                                          // 0으로 나누기 방지: count>0 체크 필수
 
-int max = Integer.MIN_VALUE;
-for (int v : values) max = Math.max(max, v);
+// ── 최대/최소 ──
+int max = Integer.MIN_VALUE, min = Integer.MAX_VALUE;
+for (int v : values) { max = Math.max(max, v); min = Math.min(min, v); }
 ```
 
-### 10-6. 문자열 시간 비교
+### 10-6. 시간/날짜 처리 (문자열 그대로 — 빈출!)
 ```java
+// yyyyMMddHHmmss 형식은 "사전순 == 시간순" → 파싱 없이 문자열 비교로 끝
+// ── 시간 범위 필터링 ──
+String window = "2025041010";              // yyyyMMddHH (시험지가 주는 기준)
+String start  = window + "0000";           // 20250410100000
+String end    = window + "5959";           // 20250410105959
 if (ts.compareTo(start) >= 0 && ts.compareTo(end) <= 0) { /* 범위 내 */ }
+
+// ── 시간대/일별 그룹핑 (substring으로 key 자르기) ──
+String hourKey = ts.substring(0, 10);      // yyyyMMddHH (시간대별)
+String dateKey = ts.substring(0, 8);       // yyyyMMdd   (일별)
+groups.computeIfAbsent(hourKey, k -> new ArrayList<>()).add(item);
+// substring(0,10) — Sample.md의 .string()은 오타! 반드시 substring
 ```
 
 ### 10-7. 파일 쓰기
 ```java
 PrintWriter pw = new PrintWriter(new FileWriter("OUTPUT.TXT"));
 pw.println("line1");
+pw.printf("%s/%d%n", name, count);   // %n = 줄바꿈
 pw.close();
 ```
 
@@ -1059,4 +1510,88 @@ pw.close();
 [ ] Inner DTO 클래스는 반드시 static — 아니면 Gson이 인스턴스 생성 못 함
 [ ] HttpClient stop() 호출 — 안 하면 커넥션 풀 소진으로 이후 요청 행(hang)
 [ ] CountDownLatch catch 블록에서도 countDown — 안 하면 예외 시 영원히 대기
+[ ] JSON 값 공백 함정 — "P " 처럼 값 끝에 공백 올 수 있음 → .getAsString().trim()
+[ ] ID 자릿수 함정 — "req00" vs "req001" vs "req0010" 혼동 주의 (== 비교는 정확히)
+[ ] 숫자 정렬 함정 — "req10"이 "req2"보다 앞에 옴(사전순) → 숫자추출 정렬(10-4)
+[ ] 정수 나눗셈 — 평균 등 long/int 나눗셈은 소수점 버림, count>0 체크
+```
+
+---
+
+## 13. IDE 세팅 / 실행 (IntelliJ·Eclipse 공통)
+
+> 코드가 맞아도 "Jetty/Gson을 못 찾음(빨간 줄, ClassNotFound)"이면 0점. 실행 전 라이브러리부터 잡자.
+
+```
+1) 실행: 메인 클래스(MainEntry 등) 열고 → 우클릭 → Run  (또는 ▶ 버튼 / Shift+F10)
+
+2) import가 빨간 줄(org.eclipse.jetty..., com.google.gson...)이면 라이브러리 미연결:
+   ─ IntelliJ ─
+     File → Project Structure → Libraries → + → Java →
+       lib 폴더(또는 jetty/gson jar들) 선택 → OK → Apply
+     (Maven 프로젝트면 pom.xml 우클릭 → Maven → Reload Project)
+   ─ Eclipse ─
+     프로젝트 우클릭 → Build Path → Configure Build Path →
+       Libraries 탭 → Add JARs(프로젝트 내 lib) 또는 Add External JARs → Apply
+
+3) Jetty 버전 확인 — 라이브러리에 잡힌 jar 파일명을 보면 됨
+     jetty-...-12.x.jar  → 12 import 사용 (이 문서 6번/7B번 그대로)
+     jetty-...-9.x.jar   → ContentResponse 등은 org.eclipse.jetty.client.api.* 경로
+
+4) 실행 디렉토리(작업 폴더) 주의 — Paths.get("STATE.TXT")는 "실행 시점 폴더" 기준
+     IntelliJ: Run → Edit Configurations → Working directory 를 데이터 파일 있는 폴더로
+     안 맞으면 NoSuchFileException → 파일은 맞는데 못 읽는 흔한 함정
+
+5) 서버(L3/L4)는 Run 하면 콘솔이 안 끝나고 떠 있는 게 정상 (server.join() 때문)
+     이 상태에서 MOCK.EXE / 테스트 실행 → "테스트에 성공했습니다!" 확인 → 멈춤(■)으로 종료
+```
+
+---
+
+## 14. 시험 전략 (코딩 전 5분이 점수를 가른다)
+
+### 14-1. 시작하면 이 순서로 (코딩 전)
+```
+① 마지막 단계(L4 또는 최종문항)부터 읽어라
+   → 최종에 필요한 필드/자료구조를 L1부터 미리 깔아야 나중에 안 뒤엎음
+   예) L4에 latency가 필요하면 → L1 VO부터 그 필드 자리를 비워둠
+
+② 데이터 파일 + 기대출력(COMPARE/CMP_*.TXT) 먼저 열기
+   → 정답을 보고 거꾸로 코딩. 구분자(#? ,? |?), 필드 수, 함정 확인
+
+③ 자료구조 3줄 설계 (주석으로)
+   // 저장소: 무엇을 key로, 무엇을 value로?
+   // 흐름:   입력 → 처리 → 출력
+   // 확장:   다음 단계에서 더 붙을 것
+```
+
+### 14-2. 자료구조 빠른 판단표
+```
+요청별 1:1 매칭        → Map<id, value> 두 개 만들어 같은 key로 비교
+복합키 매칭            → Map<"agentId#requestId", 데이터>
+시간대/일별 그룹핑      → Map<ts.substring(0,10), List<항목>>
+모델→에이전트 역매핑    → Map<modelName, List<agentId>>  (+ Set으로 중복제거)
+빈도수/카운팅          → Map<항목, Integer>  (merge 사용, 10-3)
+```
+
+### 14-3. 단계별 코딩 순서 (선행 복사 원칙)
+```
+L1 완성 → 검증 → 통째로 복사해서 L2 만들기 → 검증 → L3로 복사 → ... → L4
+※ 매 단계 "이전 단계 소스 복사 후 확장" — 처음부터 새로 짜지 말 것
+※ L3(서버)가 안 되면 L4도 0점 → L3를 확실히 동작시킨 뒤 L4로
+```
+
+### 14-4. 막혔을 때 / 시간 부족할 때
+```
+L1·L2에서 막힘   → 데이터 파일을 손으로 따라가며 기대값을 직접 계산해 비교
+L3(서버)에서 막힘 → 서버 뼈대(6번)만이라도 올리고 200 응답부터 통과시키기
+시간 부족         → L1·L2 완벽 마무리로 기본 점수 확보 (부분점수 없는 단계는 '동작'에 집중)
+```
+
+### 14-5. 제출 직전 30초
+```
+□ 디버그 println 전부 삭제 (L1/L2 불필요 출력 = 오답)
+□ 상대경로인가 (Paths.get("STATE.TXT") O / 절대경로 X)
+□ 대소문자 — JSON key, endpoint path, type 문자열 시험지와 정확히 일치
+□ 각 단계 폴더에 소스 존재 + 컴파일 OK + 테스트 통과 확인
 ```
